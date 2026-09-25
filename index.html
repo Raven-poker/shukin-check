@@ -100,11 +100,15 @@ label.f>span{display:block;font-size:13px;font-weight:600;color:var(--sub);margi
 .chk{display:flex;align-items:center;gap:8px;margin-bottom:14px;font-size:15px}
 .chk input{width:20px;height:20px;accent-color:var(--accent)}
 .dlg .foot{display:flex;gap:8px;margin-top:6px}
-.dlg .foot .btn{flex:1}
+.dlg .foot .btn{flex:1;white-space:nowrap;padding:12px 8px}
 .toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom));transform:translateX(-50%) translateY(20px);
   background:var(--ink);color:var(--bg);padding:10px 18px;border-radius:99px;font-size:14px;opacity:0;
   transition:all .25s;pointer-events:none;z-index:50;white-space:nowrap}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.kanpa{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.kanpa .chip:not(:last-child){background:var(--ok-soft);border-color:transparent;color:var(--ok);font-weight:600}
+.preview{font-size:14px;padding:10px 12px;border-radius:10px;background:var(--accent-soft);margin-bottom:14px}
+.hide{display:none}
 .foot-links{display:flex;gap:8px;justify-content:center;margin-top:24px}
 .foot-links .btn{font-size:13px;padding:8px 12px}
 .fab{position:fixed;right:max(16px,calc(50vw - 264px));bottom:calc(20px + env(safe-area-inset-bottom));
@@ -140,22 +144,25 @@ function load() {
 function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) { toast('保存できませんでした'); } }
 function getEv(id) { return state.events.find(e => e.id === id); }
 
-// 金額計算: 個別指定(fixed)の人はその額、残りを他の人で均等割り(端数単位で切り上げ)
+// 金額計算: 総額からカンパと金額指定分を引き、残りを倍率(weight)で按分(端数単位で切り上げ)
 function calc(ev) {
+  const kanpa = (ev.kanpa || []).reduce((s, k) => s + k.amount, 0);
   const fixedSum = ev.members.reduce((s, m) => s + (m.fixed != null ? m.fixed : 0), 0);
-  const free = ev.members.filter(m => m.fixed == null);
-  const rest = Math.max(0, ev.total - fixedSum);
+  const weightSum = ev.members.reduce((s, m) => s + (m.fixed == null ? (m.weight || 1) : 0), 0);
+  const rest = Math.max(0, ev.total - kanpa - fixedSum);
   const unit = ev.unit || 1;
-  const each = free.length ? Math.ceil(rest / free.length / unit) * unit : 0;
+  const base = weightSum ? rest / weightSum : 0;
+  const roundUp = x => Math.ceil(x / unit - 1e-9) * unit;
   const amt = {};
-  let expected = 0, collected = 0, paidN = 0;
+  let expected = kanpa, collected = kanpa, paidN = 0;
   for (const m of ev.members) {
-    amt[m.id] = m.fixed != null ? m.fixed : each;
+    amt[m.id] = m.fixed != null ? m.fixed : roundUp(base * (m.weight || 1));
     expected += amt[m.id];
     if (m.paid) { collected += amt[m.id]; paidN++; }
   }
-  return { amt, each, expected, collected, paidN, n: ev.members.length, diff: expected - ev.total };
+  return { amt, each: roundUp(base), kanpa, expected, collected, paidN, n: ev.members.length, diff: expected - ev.total };
 }
+const payLabel = m => m.fixed != null ? '金額指定' : (m.weight || 1) !== 1 ? '×' + (m.weight) : '';
 
 function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.classList.add('show');
@@ -222,7 +229,7 @@ function renderDetail(ev) {
         <span>${m.paid ? '支払済 ' + (m.paidAt ? fmtTime(m.paidAt) : '') : '未払い'}${m.memo ? ' ・ ' + esc(m.memo) : ''}</span>
       </button>
       ${m.paid ? `<button class="method" onclick="cycleMethod('${ev.id}','${m.id}')">${esc(m.method || '現金')}</button>` : ''}
-      <div class="amt">${yen(c.amt[m.id])}${m.fixed != null ? '<span class="fx">個別</span>' : ''}</div>
+      <div class="amt">${yen(c.amt[m.id])}${payLabel(m) ? `<span class="fx">${payLabel(m)}</span>` : ''}</div>
     </div>`).join('');
   if (!list.length) rows = `<div class="empty" style="padding:24px">${filter === 'unpaid' ? (c.n ? '🎉 全員支払い済みです！' : 'メンバーを追加してください') : '該当なし'}</div>`;
 
@@ -233,10 +240,14 @@ function renderDetail(ev) {
       <div class="bar ${done ? 'done' : ''}"><i style="width:${pct}%"></i></div>
       <div class="grid">
         <div><b>${yen(ev.total)}</b><span>お会計</span></div>
-        <div><b>${c.n ? yen(c.each) : '-'}</b><span>1人あたり</span></div>
+        <div><b>${c.n ? yen(c.each) : '-'}</b><span>基本の1人分</span></div>
         <div><b style="color:${done ? 'var(--ok)' : 'var(--ng)'}">${c.paidN}/${c.n}</b><span>支払済</span></div>
       </div>
       ${note ? `<div class="note">${note}</div>` : ''}
+      <div class="kanpa">
+        ${(ev.kanpa || []).map(k => `<button class="chip" onclick="removeKanpa('${ev.id}','${k.id}')">🙏 ${esc(k.name)} ${yen(k.amount)} ✕</button>`).join('')}
+        <button class="chip" onclick="openKanpa('${ev.id}')">＋ カンパ・差し入れ</button>
+      </div>
     </div>
     <div class="actions">
       <button class="btn" onclick="shareReminder('${ev.id}')">📣 催促文を送る</button>
@@ -290,28 +301,99 @@ function addMembers(e, evId) {
 function newMember(name) { return { id: uid(), name, fixed: null, paid: false, paidAt: null, method: null, memo: '' }; }
 
 // ---------- member dialog ----------
+const WEIGHTS = [0.5, 0.8, 1.2, 1.5, 2, 3];
+let memberMode = 'equal';
 function openMember(evId, mId) {
   const ev = getEv(evId), m = ev.members.find(x => x.id === mId), c = calc(ev);
+  memberMode = m.fixed != null ? 'fixed' : (m.weight || 1) !== 1 ? 'weight' : 'equal';
   showDialog(`
     <h2>${esc(m.name)}</h2>
     <label class="f"><span>名前</span><input id="mName" value="${esc(m.name)}"></label>
-    <label class="chk"><input type="checkbox" id="mFixedOn" ${m.fixed != null ? 'checked' : ''}
-      onchange="$('#mFixed').disabled=!this.checked">金額を個別に指定する（上司多め・遅刻割引など）</label>
-    <label class="f"><span>個別金額（残りは他の人で均等割り）</span>
-      <input id="mFixed" type="number" inputmode="numeric" min="0" value="${m.fixed != null ? m.fixed : c.amt[m.id]}" ${m.fixed != null ? '' : 'disabled'}></label>
+    <label class="f" style="margin-bottom:6px"><span>払い方</span></label>
+    <div class="seg" id="mMode">
+      <button type="button" data-mode="equal" onclick="setMemberMode('equal')">均等</button>
+      <button type="button" data-mode="weight" onclick="setMemberMode('weight')">傾斜（倍率）</button>
+      <button type="button" data-mode="fixed" onclick="setMemberMode('fixed')">金額指定</button>
+    </div>
+    <div id="mWeightBox">
+      <label class="f"><span>倍率（1＝みんなと同じ。上司は多め、新人・遅刻は少なめ）</span>
+        <input id="mWeight" type="number" inputmode="decimal" min="0" step="0.1" value="${m.weight && m.weight !== 1 ? m.weight : 1.5}" oninput="previewMember('${evId}','${mId}')">
+        <div class="chips">${WEIGHTS.map(w => `<button type="button" class="chip" onclick="$('#mWeight').value=${w};previewMember('${evId}','${mId}')">×${w}</button>`).join('')}</div></label>
+    </div>
+    <div id="mFixedBox">
+      <label class="f"><span>この人が払う金額（残りを他の人で割ります）</span>
+        <input id="mFixed" type="number" inputmode="numeric" min="0" step="1000" value="${m.fixed != null ? m.fixed : c.amt[m.id]}" oninput="previewMember('${evId}','${mId}')"></label>
+    </div>
+    <div class="preview" id="mPreview"></div>
     <label class="f"><span>メモ</span><input id="mMemo" value="${esc(m.memo || '')}" placeholder="例: 後日PayPay、立替あり"></label>
     <div class="foot">
       <button class="btn danger" onclick="removeMember('${evId}','${mId}')">削除</button>
       <button class="btn sub" onclick="closeDialog()">キャンセル</button>
       <button class="btn" onclick="saveMember('${evId}','${mId}')">保存</button>
     </div>`);
+  editing = [evId, mId];
+  setMemberMode(memberMode);
+}
+let editing = [];
+function setMemberMode(mode) {
+  memberMode = mode;
+  document.querySelectorAll('#mMode button').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
+  $('#mWeightBox').classList.toggle('hide', mode !== 'weight');
+  $('#mFixedBox').classList.toggle('hide', mode !== 'fixed');
+  previewMember(...editing);
+}
+function readMemberForm(m) {
+  const r = { ...m, fixed: null, weight: 1 };
+  if (memberMode === 'fixed') r.fixed = Math.max(0, Math.round(Number($('#mFixed').value) || 0));
+  if (memberMode === 'weight') r.weight = Math.max(0, Math.round((Number($('#mWeight').value) || 1) * 100) / 100);
+  return r;
+}
+// 変更後の金額を保存前に表示する
+function previewMember(evId, mId) {
+  const ev = getEv(evId), m = ev.members.find(x => x.id === mId);
+  const trial = { ...ev, members: ev.members.map(x => x.id === mId ? readMemberForm(x) : x) };
+  const c = calc(trial);
+  const others = trial.members.filter(x => x.id !== mId && x.fixed == null && (x.weight || 1) === 1);
+  $('#mPreview').innerHTML = `→ ${esc(m.name)}さん <b>${yen(c.amt[mId])}</b>` +
+    (others.length ? ` ／ 他の人 <b>${yen(c.amt[others[0].id])}</b>` : '') +
+    (c.diff < 0 ? `<br><span style="color:var(--ng)">会計より ${yen(-c.diff)} 足りません</span>` : '');
 }
 function saveMember(evId, mId) {
-  const ev = getEv(evId), m = ev.members.find(x => x.id === mId);
+  const ev = getEv(evId), i = ev.members.findIndex(x => x.id === mId);
+  const m = readMemberForm(ev.members[i]);
   m.name = $('#mName').value.trim() || m.name;
-  m.fixed = $('#mFixedOn').checked ? Math.max(0, Math.round(Number($('#mFixed').value) || 0)) : null;
   m.memo = $('#mMemo').value.trim();
+  ev.members[i] = m;
   save(); closeDialog(); renderDetail(ev);
+}
+
+// ---------- kanpa ----------
+function openKanpa(evId) {
+  const ev = getEv(evId);
+  showDialog(`
+    <h2>カンパ・差し入れ</h2>
+    <p class="muted" style="margin-top:-6px">部長からの1万円など、誰かが多めに出してくれた分です。お会計から差し引いて、残りをみんなで割ります。参加していない人のカンパも入れられます。</p>
+    <label class="f"><span>出してくれた人</span><input id="kName" list="kNames" placeholder="例: 田中部長">
+      <datalist id="kNames">${ev.members.map(m => `<option value="${esc(m.name)}">`).join('')}</datalist></label>
+    <label class="f"><span>金額</span><input id="kAmount" type="number" inputmode="numeric" min="0" step="1000" placeholder="10000"></label>
+    <div class="foot">
+      <button class="btn sub" onclick="closeDialog()">キャンセル</button>
+      <button class="btn" onclick="saveKanpa('${evId}')">追加</button>
+    </div>`);
+  setTimeout(() => $('#kName').focus(), 50);
+}
+function saveKanpa(evId) {
+  const ev = getEv(evId), name = $('#kName').value.trim(), amount = Math.round(Number($('#kAmount').value) || 0);
+  if (!name || amount <= 0) { toast('名前と金額を入力してください'); return; }
+  (ev.kanpa = ev.kanpa || []).push({ id: uid(), name, amount });
+  save(); closeDialog(); renderDetail(ev);
+  toast(`${name}さん ありがとうございます🙏`);
+}
+function removeKanpa(evId, kId) {
+  const ev = getEv(evId), k = ev.kanpa.find(x => x.id === kId);
+  if (!confirm(`${k.name}さんのカンパ ${yen(k.amount)} を取り消しますか？`)) return;
+  ev.kanpa = ev.kanpa.filter(x => x.id !== kId);
+  save(); renderDetail(ev);
 }
 function removeMember(evId, mId) {
   const ev = getEv(evId), m = ev.members.find(x => x.id === mId);
@@ -400,12 +482,17 @@ async function shareText(text, doneMsg) {
   }
   toast(doneMsg);
 }
+function kanpaLines(ev) {
+  const ks = ev.kanpa || [];
+  return ks.length ? ['', ...ks.map(k => `🙏 ${k.name}さんから ${yen(k.amount)} のカンパをいただきました！`)] : [];
+}
 function shareReminder(evId) {
   const ev = getEv(evId), c = calc(ev);
   const unpaid = ev.members.filter(m => !m.paid);
   if (!unpaid.length) { toast('未払いの人はいません 🎉'); return; }
   const lines = [`【${ev.name}】集金のお願い🙏`, `${fmtDate(ev.date)} はありがとうございました！`, '', 'まだの方はお支払いをお願いします。'];
   for (const m of unpaid) lines.push(`・${m.name}さん ${yen(c.amt[m.id])}`);
+  lines.push(...kanpaLines(ev));
   if (ev.memo) lines.push('', ev.memo);
   shareText(lines.join('\n'), '催促文をコピーしました');
 }
@@ -413,6 +500,7 @@ function shareStatus(evId) {
   const ev = getEv(evId), c = calc(ev);
   const lines = [`【${ev.name}】${fmtDate(ev.date)}`, `お会計 ${yen(ev.total)} ／ 回収 ${yen(c.collected)} / ${yen(c.expected)}（${c.paidN}/${c.n}人）`, ''];
   for (const m of ev.members) lines.push(`${m.paid ? '✅' : '⬜'} ${m.name} ${yen(c.amt[m.id])}${m.paid && m.method ? `（${m.method}）` : ''}`);
+  lines.push(...kanpaLines(ev));
   shareText(lines.join('\n'), '状況をコピーしました');
 }
 
